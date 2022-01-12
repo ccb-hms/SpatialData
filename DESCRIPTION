@@ -1,0 +1,30 @@
+Package: SpatialData
+Version: 0.99.0
+Title: Collection of spatially resolved omics datasets
+Description: Collection of spatially resolved omics datasets in dedicated
+    Bioconductor formats. The datasets have been sourced from various publicly 
+    available sources, and cover several technological platforms.
+Authors@R: person("Ludwig", "Geistlinger", email = "ludwig_geistlinger@hms.harvard.edu",
+                  role = c("aut", "cre"))
+URL: https://github.com/ccb-hms/SpatialData
+BugReports: https://github.com/ccb-hms/SpatialData/issues
+License: MIT + file LICENSE
+biocViews:
+    ExperimentHub, 
+    ExperimentData, 
+    ReproducibleResearch, 
+    ExpressionData, 
+    SingleCellData, 
+    Homo_sapiens_Data, 
+    Mus_musculus_Data
+Depends: 
+    ExperimentHub, 
+    SpatialExperiment
+Imports:
+    utils
+VignetteBuilder: knitr
+Suggests:
+    BiocStyle, 
+    knitr, 
+    rmarkdown
+RoxygenNote: 7.1.1

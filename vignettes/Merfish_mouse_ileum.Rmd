@@ -1,0 +1,305 @@
+---
+title: "Import and representation of MERFISH mouse ileum data"
+author: "Ludwig Geistlinger and Robert Gentleman"
+affiliation: Center for Computational Biomedicine, Harvard Medical School
+output:
+  BiocStyle::html_document:
+    self_contained: yes 
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    code_folding: show
+date: "`r doc_date()`"
+vignette: >
+  % \VignetteIndexEntry{Mouse ileum}
+  % \VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+    collapse = TRUE,
+    comment = "#>",
+    crop = NULL ## Related to https://stat.ethz.ch/pipermail/bioc-devel/2020-April/016656.html
+)
+```
+
+# Setup
+
+```{r}
+library(vroom)
+library(BumpyMatrix)
+library(SpatialExperiment)
+```
+
+Start with downloading from and unzipping the dataset from:
+https://datadryad.org/stash/dataset/doi:10.5061%2Fdryad.jm63xsjb2
+
+
+```{r}
+data.dir <- "data_release_baysor_merfish_gut"
+raw.dir <- file.path(data.dir, "raw_data")
+proc.dir <- file.path(data.dir, "data_analysis")
+baysor.dir <- file.path(proc.dir, "baysor") 
+cellpose.dir <- file.path(proc.dir, "cellpose") 
+baysor.cellpose.dir <- file.path(proc.dir, "baysor_membrane_prior") 
+```
+
+# Data
+
+Def. ileum: the final and longest segment of the small intestine.
+
+## Raw data
+
+What's there:
+
+```{r}
+list.files(raw.dir)
+```
+
+mRNA molecule data: 820k observations for 241 genes
+
+```{r, message = FALSE}
+mol.file <- file.path(raw.dir, "molecules.csv")
+mol.dat <- vroom::vroom(mol.file)
+mol.dat <- data.frame(mol.dat)
+dim(mol.dat)
+head(mol.dat)
+length(unique(mol.dat$gene))
+```
+
+Image data: 
+
+1. [DAPI](https://en.wikipedia.org/wiki/DAPI) stain signal:
+
+```{r, fig.height = 10}
+dapi.file <- file.path(raw.dir, "dapi_stack.tif")
+dapi.img <- SpatialExperiment::SpatialImage(dapi.file)
+class(dapi.img)
+SpatialExperiment::imgSource(dapi.img)
+plot(SpatialExperiment::imgRaster(dapi.img))
+```
+
+2. Membrane Na+/K+ - ATPase immunofluorescence signal:
+
+```{r, fig.height = 10}
+mem.file <- file.path(raw.dir, "membrane_stack.tif")
+mem.img <- SpatialExperiment::SpatialImage(mem.file)
+class(mem.img)
+SpatialExperiment::imgSource(mem.img)
+plot(SpatialExperiment::imgRaster(mem.img))
+```
+
+## Processed data
+
+### Baysor (mRNA-only) segmentation
+
+1. Cell-by-gene matrix. Rows: genes; Cols: cells
+
+```{r, message = FALSE}
+counts.file <- file.path(baysor.dir, "segmentation", "segmentation_counts.tsv")
+counts.baysor <- vroom::vroom(counts.file, col_names = FALSE)
+counts.baysor <- data.frame(counts.baysor)
+genes <- counts.baysor[,1]
+counts.baysor <- as.matrix(counts.baysor[,-1])
+rownames(counts.baysor) <- genes
+dim(counts.baysor)
+counts.baysor[1:5,1:5]
+```
+
+2. Cell metadata. Each cell corresponds to each column in `segmentation_counts.csv`.
+
+```{r, message = FALSE}
+cdat.file <- file.path(baysor.dir, "segmentation", "segmentation_cell_stats.csv")
+cdat.baysor <- vroom::vroom(cdat.file)
+cdat.baysor <- data.frame(cdat.baysor)
+colnames(counts.baysor) <- cdat.baysor$cell
+dim(cdat.baysor)
+head(cdat.baysor)
+```
+
+3. Segmentation and mRNA metadata. Each row corresponds to one mRNA in `raw_data/molecules.csv`
+
+```{r, message = FALSE}
+rdat.file <- file.path(baysor.dir, "segmentation", "segmentation.csv")
+rdat.baysor <- vroom::vroom(rdat.file)
+rdat.baysor <- data.frame(rdat.baysor)
+rdat.baysor <- subset(rdat.baysor, cell != 0)
+dim(rdat.baysor)
+head(rdat.baysor)
+```   
+
+4. Clustering / cell type assignment: Assignment of each cell to cell type clusters.
+
+```{r, message = FALSE}
+ctype.file <- file.path(baysor.dir, "clustering", "cell_assignment.csv")
+ctype.baysor <- vroom::vroom(ctype.file)
+ctype.baysor <- data.frame(ctype.baysor)
+dim(ctype.baysor)
+head(ctype.baysor)
+table(ctype.baysor$leiden_final)
+```
+
+combine with cell metadata
+
+```{r}
+stopifnot(all(ctype.baysor$cell == cdat.baysor$cell))
+cdat.baysor <- merge(cdat.baysor, ctype.baysor, by = "cell")
+head(cdat.baysor)
+```
+
+5. Marker genes: Marker gene statistics for each cluster
+
+```{r, message = FALSE}
+marker.file <- file.path(baysor.dir, "clustering", "marker_genes.csv")
+marker.baysor <- vroom::vroom(marker.file)
+marker.baysor <- data.frame(marker.baysor)
+dim(marker.baysor)
+head(marker.baysor)
+```
+
+Quick sanity check whether all markers are present in the count matrix:
+
+```{r, height = 6}
+all(marker.baysor$gene_name %in% rownames(counts.baysor))
+hist(table(marker.baysor$gene_name))
+```
+
+6. Construct `SpatialExperiment`:
+
+Construct `data.frame` of molecule coordinates. Here, we only include the x-, y-, z-coordinates,
+but we could keep all columns from the molecule metadata file such as `qc_score` and 
+`assignment confidence`.
+
+```{r}
+genes <- rdat.baysor$gene
+cells <- rdat.baysor$cell
+mol <- BumpyMatrix::splitAsBumpyMatrix(rdat.baysor[, c("x", "y", "z")], 
+                                       row = genes, col = cells)
+```
+
+Quick sanity check for molecules of a specific gene in a specific cell:
+
+```{r}
+subset(rdat.baysor, gene == "Neat1" & cell == 1)
+mol["Neat1",1]
+counts.baysor["Neat1",1]
+```
+
+```{r}
+stopifnot(all(rownames(mol) == rownames(counts.baysor)))
+spe <- SpatialExperiment(assays = list(counts = counts.baysor, molecules = mol),
+                         colData = cdat.baysor,
+                         spatialCoordsNames = c("x", "y"),
+                         spatialDataNames = c("density", "elongation", "area", "avg_confidence"))
+spe
+```
+
+Add the images:
+
+```{r}
+spe <- SpatialExperiment::addImg(spe, 
+                                 sample_id = "sample01", 
+                                 image_id = "dapi",
+                                 imageSource = dapi.file, 
+                                 scaleFactor = NA_real_, 
+                                 load = FALSE)
+spe <- SpatialExperiment::addImg(spe, 
+                                 sample_id = "sample01", 
+                                 image_id = "membrane",
+                                 imageSource = mem.file, 
+                                 scaleFactor = NA_real_, 
+                                 load = FALSE)
+spe
+```
+
+7. Inspect `SpatialExperiment`:
+
+```{r}
+assay(spe, "counts")[1:5,1:5]
+assay(spe, "molecules")["Neat1",1]
+colData(spe)
+head(spatialCoords(spe))
+spatialData(spe)
+imgData(spe)
+imgData(spe)$data
+```
+
+### Cellpose (membrane or DAPI-based) segmentation
+
+Ok, here is a question: where do we store alternative segmentations?
+The `altExps` slot of a `SummarizedExperiment`-derivative is thought for alternative
+experiments over a distinct set of features for the same samples. But here we are
+having a distinct set of samples/cells for the sample features. 
+Is this just a separate `SpatialExperiment` with potentially duplicating information
+(incl. the images!) or a use case for `MultiAssayExperiment`? 
+Or maybe alternative BumpyMatrices in a separate slot such as the `reducedDim` slot.
+
+1. Cell-by-gene matrix. Rows: genes; Cols: cells
+
+```{r, message = FALSE}
+counts.file <- file.path(cellpose.dir, "segmentation", "segmentation_counts.tsv")
+counts.cellpose <- vroom::vroom(counts.file) 
+counts.cellpose <- data.frame(counts.cellpose) 
+dim(counts.cellpose)
+counts.cellpose[1:5,1:5]
+```
+
+2. Cell coordinates:
+
+```{r, message = FALSE}
+cdat.file <- file.path(cellpose.dir, "segmentation", "cell_coords.csv")
+cdat.cellpose <- vroom::vroom(cdat.file)
+cdat.cellpose <- data.frame(cdat.cellpose)
+dim(cdat.cellpose)
+head(cdat.cellpose)
+```
+
+### Baysor (with Cellpose membrane segmentation prior) segmentation
+
+1. Cell-by-gene matrix. Rows: genes; Cols: cells
+
+```{r}
+counts.file <- file.path(baysor.cellpose.dir, "segmentation", "segmentation_counts.tsv")
+counts.baysor.cellpose <- read.delim(counts.file, header = FALSE) 
+dim(counts.baysor.cellpose)
+counts.baysor.cellpose[1:5,1:5]
+```
+
+2. Cell metadata. Each cell corresponds to each column in `segmentation_counts.csv`.
+
+```{r, message = FALSE}
+cdat.file <- file.path(baysor.dir, "segmentation", "segmentation_cell_stats.csv")
+cdat.baysor.cellpose <- vroom::vroom(cdat.file)
+cdat.baysor.cellpose <- data.frame(cdat.baysor.cellpose)
+colnames(counts.baysor.cellpose) <- cdat.baysor.cellpose$cell
+dim(cdat.baysor.cellpose)
+head(cdat.baysor.cellpose)
+```
+
+3. Segmentation and mRNA metadata. Each row corresponds to one mRNA in `raw_data/molecules.csv`
+
+```{r, message = FALSE}
+rdat.file <- file.path(baysor.dir, "segmentation", "segmentation.csv")
+rdat.baysor.cellpose <- vroom::vroom(rdat.file)
+rdat.baysor.cellpose <- data.frame(rdat.baysor.cellpose)
+rdat.baysor.cellpose <- subset(rdat.baysor.cellpose, cell != 0)
+dim(rdat.baysor.cellpose)
+head(rdat.baysor.cellpose)
+```   
+
+# Visualization
+
+There seems to be a problem here when compared with Figure 6 of the publication.
+
+```{r, fig.height = 10}
+plot(SpatialExperiment::imgRaster(mem.img))
+endo.ind <- spe$leiden_final == "Endothelial"
+points(x = spatialCoords(spe)[endo.ind, "x"], 
+       y = spatialCoords(spe)[endo.ind, "y"],
+       col = "lightgreen", pch = 20)
+bplasm.ind <- spe$leiden_final == "B (Plasma)"
+points(x = spatialCoords(spe)[bplasm.ind, "x"],
+       y = spatialCoords(spe)[bplasm.ind, "y"],
+       col = "firebrick", pch = 20)
+```
