@@ -1,0 +1,130 @@
+---
+title: "Visualization of MERFISH mouse ileum data"
+author: "Ludwig Geistlinger and Robert Gentleman"
+affiliation: Center for Computational Biomedicine, Harvard Medical School
+output:
+  BiocStyle::html_document:
+    self_contained: yes 
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    code_folding: show
+date: "`r doc_date()`"
+vignette: >
+  % \VignetteIndexEntry{Mouse ileum visualization}
+  % \VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+    collapse = TRUE,
+    comment = "#>",
+    crop = NULL ## Related to https://stat.ethz.ch/pipermail/bioc-devel/2020-April/016656.html
+)
+```
+
+# Setup
+
+```{r, message = FALSE}
+library(cytomapper)
+library(vroom)
+library(HDF5Array)
+```
+
+Start with downloading from and unzipping the dataset from:
+https://datadryad.org/stash/dataset/doi:10.5061%2Fdryad.jm63xsjb2
+
+```{r}
+data.dir <- "data_release_baysor_merfish_gut"
+raw.dir <- file.path(data.dir, "raw_data")
+proc.dir <- file.path(data.dir, "data_analysis")
+baysor.dir <- file.path(proc.dir, "baysor") 
+cellpose.dir <- file.path(proc.dir, "cellpose") 
+baysor.cellpose.dir <- file.path(proc.dir, "baysor_membrane_prior") 
+```
+
+# Data
+
+Def. ileum: the final and longest segment of the small intestine.
+
+## Raw data
+
+What's there:
+
+```{r}
+list.files(raw.dir)
+```
+
+mRNA molecule data: 820k observations for 241 genes
+
+```{r, message = FALSE}
+mol.file <- file.path(raw.dir, "molecules.csv")
+mol.dat <- vroom::vroom(mol.file)
+mol.dat <- data.frame(mol.dat)
+dim(mol.dat)
+head(mol.dat)
+length(unique(mol.dat$gene))
+```
+
+Image data: 
+
+1. [DAPI](https://en.wikipedia.org/wiki/DAPI) stain signal:
+
+```{r}
+dapi.file <- file.path(raw.dir, "dapi_stack.tif")
+dapi.img <- EBImage::readImage(dapi.file)
+dapi.img
+```
+
+2. Membrane Na+/K+ - ATPase immunofluorescence signal:
+
+```{r, fig.height = 10}
+mem.file <- file.path(raw.dir, "membrane_stack.tif")
+mem.img <- EBImage::readImage(mem.file)
+mem.img
+```
+
+Store in a `CytoImageList` object:
+
+```{r}
+cil <- cytomapper::CytoImageList(dapi = dapi.img, membrane = mem.img)
+cil
+channelNames
+```
+
+# Visualization
+
+Plot pixels with images load in memory, takes relatively long:
+
+```{r, fig.height = 10}
+system.time(
+    cytomapper::plotPixels(cil)
+)
+```
+
+## On disk storage of images
+
+```{r}
+cur_dir <- HDF5Array::getHDF5DumpDir()
+```
+
+Write to HDF5, takes very long:
+
+```{r}
+system.time(
+    cli.hdf5 <- cytomapper::loadImages(raw.dir, 
+                                       pattern = ".tif$",
+                                       on_disk = TRUE,
+                                       h5FilesPath = cur_dir)
+)
+cli.hdf5
+```
+
+Plot pixels using hdf5 backend: 
+
+```{r, fig.height = 10}
+system.time(
+    cytomapper::plotPixels(cli.hdf5)
+)
+```
