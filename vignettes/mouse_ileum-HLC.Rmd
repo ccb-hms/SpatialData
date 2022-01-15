@@ -1,0 +1,271 @@
+---
+title: "MERFISH mouse ileum data"
+author: "Helena L. Crowell"
+affiliation: "Department of Moleculuar Life Sciences, University of Zurich, Switzerland"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    theme: simplex
+    number_sections: false
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE)
+```
+
+# Preamble
+
+## Setup
+
+```{r}
+dir <- "data_release_baysor_merfish_gut"
+dir_raw <- file.path(dir, "raw_data")
+dir_seg <- file.path(dir, "data_analysis")
+dir_pos <- file.path(dir_seg, "cellpose")
+```
+
+## Dependencies
+
+```{r load-libs, message = FALSE, warning = FALSE}
+library(BumpyMatrix)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(grid)
+library(Matrix)
+library(SpatialExperiment)
+library(tidyr)
+library(tidytext)
+```
+
+## Utilities
+
+```{r utils}
+# construct 'dgCMatrix' from 'data.table' 
+# with columns 'gene', 'cell', 'x' and 'y'
+.mat <- \(.) {
+    i <- factor(.$gene)
+    j <- factor(.$cell)
+    y <- sparseMatrix(
+        i = as.integer(i),
+        j = as.integer(j),
+        x = .$count,
+        dimnames = list(
+            levels(i),
+            levels(j)))
+}
+
+# spatial plot overlaid with an image (optional)
+.plot_xy <- \(df, col, img = NULL) {
+    if (!is.null(img)) {
+        grb <- rasterGrob(img,
+            interpolate = FALSE,
+            width = unit(1, "npc"),
+            height = unit(1, "npc"))
+        p <- ggplot() + 
+            annotation_custom(
+                grob = grb,
+                xmin = 0,
+                xmax = ncol(grb$raster),
+                ymin = 0,
+                ymax = nrow(grb$raster)) + 
+            coord_fixed(
+                xlim = c(0, ncol(grb$raster)),
+                ylim = c(0, nrow(grb$raster))) 
+    } else {
+        p <- ggplot()
+    }
+    p <- p + 
+        geom_point(
+            data = df,
+            shape = 16,
+            size = 0.5,
+            aes(x, y, col = .data[[col]])) + 
+        theme_void()
+    if (is.numeric(df[[col]])) {
+        p + scale_color_viridis_c()
+    } else {
+        p + theme(legend.key.size = unit(0.5, "lines")) +
+            guides(color = guide_legend(override.aes = list(size = 2)))
+    }
+}
+```
+
+# Wrangling
+
+## Images
+
+```{r imgData}
+fnm <- c("membrane_stack.tif", "dapi_stack.tif")
+fnm <- file.path(dir_raw, fnm)
+
+spi <- lapply(fnm, \(.) {
+    # construct SPI
+    . <- SpatialImage(.)
+    # flip horizontally
+    mirrorImg(., "h")
+})
+
+# construct 'imgData'-valid 'DataFrame'
+(id <- DataFrame(
+    sample_id = "gut",
+    image_id = c("memb", "dapi"),
+    data = I(spi),
+    scaleFactor = NA_real_))
+```
+
+## mRNA molecules
+
+```{r molecules}
+# get molecule (mRNA) coordinates
+fnm <- file.path(dir_raw, "molecules.csv")
+mol <- read.csv(fnm)[, c("gene", "x_pixel", "y_pixel")]
+names(mol)[c(2, 3)] <- c("x", "y")
+
+# xy <- mol[c("x_pixel", "y_pixel")]
+# names(xy) <- c("x", "y")
+# mol <- splitAsBumpyMatrix(xy,
+#     row = mol$gene,
+#     col = rep(1, nrow(mol)))
+```
+
+## mRNA counts 
+
+### Baysor
+
+```{r}
+# list available segmentations
+dir <- list.files(dir_seg, "baysor", full.names = TRUE)
+names(dir) <- basename(dir)
+```
+
+```{r colData}
+cd <- lapply(names(dir), \(.) {
+    # cell metadata
+    fnm <- file.path(dir[[.]], "segmentation", "segmentation_cell_stats.csv")
+    cmd <- read.csv(fnm)
+
+    # type assignments
+    fnm <- file.path(dir[[.]], "clustering", "cell_assignment.csv")
+    ids <- read.csv(fnm)
+    
+    # merge into single table
+    cd <- merge(cmd, ids, by = "cell")
+    DataFrame(cd, seg = .)
+})
+```
+
+```{r counts}
+y <- lapply(dir, \(.) {
+    # segmentation
+    fnm <- file.path(., "segmentation", "segmentation.csv")
+    seg <- read.csv(fnm)[, c("gene", "cell", "x", "y")]
+    seg <- seg[seg$cell != 0, ]
+        
+    # count number of xy-entries per gene & cell
+    dt <- data.table(seg)
+    dt <- dt[, 
+        .(count = .N), 
+        by = list(gene, cell)]
+    
+    # reshape into sparse matrix
+    .mat(dt)
+})
+```
+
+### Cellpose
+
+```{r}
+# cell metadata
+ids <- file.path(dir_pos, "clustering", "cell_assignment.csv")
+xyz <- file.path(dir_pos, "segmentation", "cell_coords.csv")
+tmp <- cbind(read.csv(ids), read.csv(xyz))
+tmp$seg <- "cellpose"
+cd <- c(cd, list(tmp))
+
+# mRNA counts
+fnm <- file.path(dir_pos, "segmentation", "segmentation_counts.tsv")
+tmp <- read.delim(fnm, row.names = 1)
+tmp <- as(as.matrix(tmp), "dgCMatrix")
+y <- c(y, list(tmp))
+```
+
+## Construct SPE
+
+```{r spe}
+# join cell metadata tables 
+cd <- lapply(cd, data.frame)
+cd <- bind_rows(cd)
+table(cd$seg)
+
+# join count matrices
+y <- do.call(cbind, y)
+dim(y)
+
+(spe <- SpatialExperiment(
+    sample_id = "gut",
+    assays = list(counts = y),
+    colData = cd, imgData = id))
+```
+
+# Visualization
+
+```{r}
+memb_img <- imgRaster(spe, image_id = "memb")
+dapi_img <- imgRaster(spe, image_id = "dapi")
+```
+
+## Cluster abundances
+
+```{r fig.width = 6, fig.height = 4}
+ns <- with(colData(spe), table(seg, leiden_final))
+df <- as.data.frame(ns, responseName = "n_cells")
+ggplot(df, aes(
+    reorder(leiden_final, n_cells), n_cells, fill = seg)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered(NULL) + theme(
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Cells {.tabset}
+
+```{r viz-cells, results = "asis", fig.width = 4, fig.height = 6}
+# split cell indices by segmentation
+idx <- split(seq_len(ncol(spe)), spe$seg)
+
+# for each segmentation...
+for (. in names(idx)) {
+    cat("### ", ., " {.tabset} \n\n")
+    sub <- spe[, idx[[.]]]
+    df <- data.frame(
+        colData(sub), 
+        spatialCoords(sub))
+    ex <- c("sample_id", "cell", "seg", "x", "y")
+    do <- setdiff(names(df), ex)
+    # ...plot each variable
+    for (. in do) {
+        if (all(is.na(df[[.]]))) next
+        p <- .plot_xy(df, ., memb_img)
+        cat("#### ", ., "\n")
+        print(p); cat("\n\n")
+    }
+}
+```
+
+## mRNA
+
+```{r viz-mols, fig.width = 4, fig.height = 6}
+gs <- grep("^Cd", unique(mol$gene), value = TRUE)
+sub <- mol[mol$gene %in% gs, ]
+.plot_xy(sub, "gene", memb_img)
+```
+
+# Session info
+
+```{r session-info}
+sessionInfo()
+```
