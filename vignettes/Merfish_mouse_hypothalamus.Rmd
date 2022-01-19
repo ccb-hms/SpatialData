@@ -1,0 +1,117 @@
+---
+title: "Import and representation of MERFISH mouse hypothalamus data"
+author: "Ludwig Geistlinger and Robert Gentleman"
+affiliation: Center for Computational Biomedicine, Harvard Medical School
+output:
+  BiocStyle::html_document:
+    self_contained: yes 
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    code_folding: show
+date: "`r doc_date()`"
+vignette: >
+  % \VignetteIndexEntry{Mouse hypothalamus}
+  % \VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+    collapse = TRUE,
+    comment = "#>",
+    crop = NULL ## Related to https://stat.ethz.ch/pipermail/bioc-devel/2020-April/016656.html
+)
+```
+
+# Setup
+
+```{r}
+library(vroom)
+library(SpatialExperiment)
+```
+
+Start with downloading from and unzipping the dataset from:
+https://datadryad.org/stash/dataset/doi:10.5061/dryad.8t8s248
+
+```{r}
+data.file <- "Moffitt_and_Bambah-Mukku_et_al_merfish_all_cells.csv"
+```
+
+# Data
+
+Def. hypothalamic preoptic region: is a part of the anterior hypothalamus that 
+controls essential social behaviors and homeostatic functions.
+
+Dimensions: 1,027,848 cells; 161 genes
+
+Cell segmentation based on total polyadenylated mRNA and DAPI nuclei costains 
+(where are the images?)
+
+Genes: the original publication says:
+Combinatorial smFISH imaging was used to identify 135 genes, followed by sequential
+rounds of two-color FISH to identify 20 additional genes (but here we have 161 genes?) 
+
+```{r, message = FALSE}
+dat <- vroom::vroom(data.file)
+dat <- data.frame(dat)
+dim(dat)
+dat[1:5,1:5]
+ind <- grep("Neuron_cluster_ID", colnames(dat))
+genes <- colnames(dat)[(ind + 1):ncol(dat)]
+genes
+length(genes)
+```
+
+1. Cell-by-gene matrix. Rows: genes; Cols: cells
+
+```{r, message = FALSE}
+exprs <- t(as.matrix(dat[,genes]))
+dim(exprs)
+exprs[1:5,1:5]
+```
+
+2. Cell metadata. 
+
+```{r, message = FALSE}
+cdat <- dat[,seq_len(ind)]
+head(cdat)
+```
+
+Data has been obtained from 36 mice (16 female, 20 male)
+
+```{r}
+table(cdat$Animal_ID, cdat$Animal_sex)
+```
+
+Animal behavior by sex:
+
+```{r}
+table(cdat$Behavior, cdat$Animal_sex)
+```
+
+Cell type assignment:
+
+```{r}
+table(cdat$Cell_class)
+```
+
+3. Construct `SpatialExperiment`:
+
+```{r}
+colnames(cdat)[c(2:3,6:7)] <- c("sample_id", "sex", "x", "y")
+colnames(cdat) <- tolower(colnames(cdat))
+spe <- SpatialExperiment(assays = list(exprs = exprs),
+                         colData = cdat,
+                         spatialCoordsNames = c("x", "y"))
+spe
+```
+
+4. Inspect `SpatialExperiment`:
+
+```{r}
+assay(spe)[1:5,1:5]
+colData(spe)
+head(spatialCoords(spe))
+```
+
