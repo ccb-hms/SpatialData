@@ -26,9 +26,10 @@ knitr::opts_chunk$set(
 
 # Setup
 
-```{r}
+```{r, message = FALSE}
 library(vroom)
 library(SpatialExperiment)
+library(ggpubr)
 ```
 
 Start with downloading from and unzipping the dataset from:
@@ -63,6 +64,10 @@ genes
 length(genes)
 ```
 
+Note: we also have complementary scRNA-seq of ~31,000 cells dissociated and
+captured from the preoptic region of the hypothalamus from multiple male and female mice
+available on GEO ([GSE113576](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE113576)).
+
 1. Cell-by-gene matrix. Rows: genes; Cols: cells
 
 ```{r, message = FALSE}
@@ -96,14 +101,49 @@ Cell type assignment:
 table(cdat$Cell_class)
 ```
 
+Def. Bregma: The bregma is the anatomical point on the skull at which the coronal
+suture is intersected perpendicularly by the sagittal suture. Used here as a 
+reference point for the twelve 1.8- by 1.8-mm imaged slices along the z-axis.
+
+The anterior position of the preoptic region is at Bregma +0.26.
+
+```{r}
+table(cdat$Bregma)
+```
+
+Some cosmetics on the column names
+
+```{r}
+colnames(cdat)[c(2:3,5:7)] <- c("sample_id", "sex", "z", "x", "y")
+colnames(cdat) <- tolower(colnames(cdat))
+```
+
+It figures that we need to center the data for each bregma slice:
+
+```{r}
+sids <- unique(cdat$sample_id)
+for(i in sids)
+{
+    ind <- cdat$sample_id == i
+    ccdat <- cdat[ind,]
+    spl <- split(ccdat, ccdat$z)
+    
+    for(i in seq_along(spl)) 
+    {   
+        spl[[i]]$x <- scale(spl[[i]]$x, scale = FALSE)
+        spl[[i]]$y <- scale(spl[[i]]$y, scale = FALSE)
+    }
+
+    cdat[ind,] <- do.call(rbind, spl)
+}
+```
+
 3. Construct `SpatialExperiment`:
 
 ```{r}
-colnames(cdat)[c(2:3,6:7)] <- c("sample_id", "sex", "x", "y")
-colnames(cdat) <- tolower(colnames(cdat))
 spe <- SpatialExperiment(assays = list(exprs = exprs),
                          colData = cdat,
-                         spatialCoordsNames = c("x", "y"))
+                         spatialCoordsNames = c("x", "y", "z"))
 spe
 ```
 
@@ -114,4 +154,27 @@ assay(spe)[1:5,1:5]
 colData(spe)
 head(spatialCoords(spe))
 ```
+
+5. Visualize as in Figure 3E of the paper for six different anterior-posterior 
+   positions from a single female mouse.
+
+```{r, fig.wide = TRUE, fig.width = 10, fig.height = 10}
+cdat <- subset(cdat, cell_class != "Ambiguous")
+cdat$cell_class <- sub(" [1-4]$", "", cdat$cell_class)
+cdat1 <- subset(cdat, sample_id == 1)
+cdat1 <- subset(cdat1, z %in% c(0.26, 0.16, 0.06, -0.04, -0.14, -0.24))
+cdat1$z <- as.character(cdat1$z)
+zum <- paste(0:5 * 100, "um")
+names(zum) <- as.character(c(0.26, 0.16, 0.06, -0.04, -0.14, -0.24))
+cdat1$z <- unname(zum[cdat1$z]) 
+
+pal <- ggpubr::get_palette("simpsons", 9)
+names(pal) <- c("Endothelial", "Excitatory", "OD Immature", "Astrocyte", "Mural", 
+                "Microglia", "Ependymal", "Inhibitory", "OD Mature")
+
+ggpubr::ggscatter(cdat1, x = "x", y = "y", color = "cell_class", facet.by = "z",
+                  shape = 20, size = 1, palette = pal) +
+                  guides(color = guide_legend(override.aes = list(size = 3)))
+```
+
 
