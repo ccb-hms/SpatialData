@@ -103,6 +103,15 @@ system.time(
 )
 ```
 
+This plots the first z-layer/channel, but we can select a specific z-layer/channel of
+the 9 different channels in the z-stack tiffs:
+
+```{r, fig.height = 10}
+cytomapper::channelNames(cil)
+cytomapper::plotPixels(cil, colour_by = "2")
+cytomapper::plotPixels(cil, colour_by = "3")
+```
+
 ## On disk storage of images
 
 ```{r}

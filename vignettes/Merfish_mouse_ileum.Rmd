@@ -26,8 +26,10 @@ knitr::opts_chunk$set(
 
 # Setup
 
-```{r}
+```{r, message = FALSE}
+library(ggplot2)
 library(vroom)
+library(jsonlite)
 library(BumpyMatrix)
 library(SpatialExperiment)
 ```
@@ -75,6 +77,7 @@ Image data:
 ```{r, fig.height = 10}
 dapi.file <- file.path(raw.dir, "dapi_stack.tif")
 dapi.img <- SpatialExperiment::SpatialImage(dapi.file)
+dapi.img <- SpatialExperiment::mirrorImg(dapi.img, "h")
 class(dapi.img)
 SpatialExperiment::imgSource(dapi.img)
 plot(SpatialExperiment::imgRaster(dapi.img))
@@ -85,6 +88,7 @@ plot(SpatialExperiment::imgRaster(dapi.img))
 ```{r, fig.height = 10}
 mem.file <- file.path(raw.dir, "membrane_stack.tif")
 mem.img <- SpatialExperiment::SpatialImage(mem.file)
+mem.img <- SpatialExperiment::mirrorImg(mem.img, "h")
 class(mem.img)
 SpatialExperiment::imgSource(mem.img)
 plot(SpatialExperiment::imgRaster(mem.img))
@@ -129,7 +133,85 @@ dim(rdat.baysor)
 head(rdat.baysor)
 ```   
 
-4. Clustering / cell type assignment: Assignment of each cell to cell type clusters.
+4. Polygon segmentation borders:
+
+Segmentation borders are provided in JSON format, and
+we have polygon segmentation borders for each of the nine z-layers:
+
+```{r}
+poly.file <- file.path(baysor.dir, "segmentation", "poly_per_z.json")
+pdat <- jsonlite::fromJSON(poly.file)
+dim(pdat)
+colnames(pdat)
+```
+
+Now let's look at the segmentation borders of the first cell in the first z-layer:
+
+```{r}
+head(pdat[1,2][[1]]$coordinates[[1]])
+pdf <- as.data.frame(pdat[1,2][[1]]$coordinates[[1]][1,,])
+colnames(pdf) <- c("x", "y")
+ggplot(pdf, aes(x = x, y = y)) + geom_polygon()
+```
+
+That is a terribly nested data structure, let's reshape that to a `data.frame`
+so we can more conveniently work with that.
+
+We therefore first write a function to pull out the coordinates for one z-layer
+at a time:
+
+```{r}
+pcoords <- pdat[1,2][[1]]$coordinates
+getSegmentationDF <- function(coords)
+{
+    y <- lapply(coords, function(x) as.data.frame(x[1,,])) 
+    y <- lapply(y, as.matrix)
+    z <- do.call(rbind, y)
+    n <- vapply(y, nrow, numeric(1)) 
+    colnames(z) <- c("x", "y")
+    z <- cbind(z, cell = rep(seq_along(y), n))    
+    return(z)
+}
+head(getSegmentationDF(pcoords))
+```
+
+We then apply the function to each z-layer to arrive at an overall `data.frame`:
+
+```{r}
+dfl <- lapply(pdat[,2], function(x) getSegmentationDF(x$coordinates))
+n <- vapply(dfl, nrow, numeric(1))
+df <- do.call(rbind, dfl)
+df <- cbind(df, z = rep(seq_along(dfl), n))
+df <- data.frame(df)
+head(df)
+dim(df) 
+```
+
+Ok, now we can look into how many cells / polygons do we have for each z-layer:
+
+```{r}
+spl <- split(df$cell, df$z)
+spl <- lapply(spl, unique)
+lengths(spl)
+```
+
+Question: how to relate that to the 5,800 cells that we have in the segmentation 
+counts matrix? 
+
+Somehow the numbers don't add up with what we have in the segmentation table:
+
+```{r}
+splr <- split(rdat.baysor$cell, rdat.baysor$z_raw)
+length(splr)
+splr <- lapply(splr, unique)
+lengths(splr)
+```
+
+Next question will be how to add the coordinates of the segmentation borders 
+to the `SpatialExperiment`. Shila Ghazanfour did some work with having instances of
+`IntegerList`s in the `spatialCoords` slot [here](https://github.com/shazanfar/spatialStuff/blob/master/reports/SpatialExperiment_polygons_example.Rmd).
+
+5. Clustering / cell type assignment: assignment of each cell to cell type clusters.
 
 ```{r, message = FALSE}
 ctype.file <- file.path(baysor.dir, "clustering", "cell_assignment.csv")
@@ -148,7 +230,7 @@ cdat.baysor <- merge(cdat.baysor, ctype.baysor, by = "cell")
 head(cdat.baysor)
 ```
 
-5. Marker genes: Marker gene statistics for each cluster
+6. Marker genes: Marker gene statistics for each cluster
 
 ```{r, message = FALSE}
 marker.file <- file.path(baysor.dir, "clustering", "marker_genes.csv")
@@ -165,7 +247,7 @@ all(marker.baysor$gene_name %in% rownames(counts.baysor))
 hist(table(marker.baysor$gene_name))
 ```
 
-6. Construct `SpatialExperiment`:
+7. Construct `SpatialExperiment`:
 
 Construct `data.frame` of molecule coordinates. Here, we only include the x-, y-, z-coordinates,
 but we could keep all columns from the molecule metadata file such as `qc_score` and 
@@ -290,7 +372,9 @@ head(rdat.baysor.cellpose)
 
 # Visualization
 
-There seems to be a problem here when compared with Figure 6 of the publication.
+## Cell metadata
+
+Overlay cell type annotation as in Figure 6 of the publication.
 
 ```{r, fig.height = 10}
 plot(SpatialExperiment::imgRaster(mem.img))
@@ -302,4 +386,89 @@ bplasm.ind <- spe$leiden_final == "B (Plasma)"
 points(x = spatialCoords(spe)[bplasm.ind, "x"],
        y = spatialCoords(spe)[bplasm.ind, "y"],
        col = "firebrick", pch = 20)
+```
+
+## Segmentation
+
+Let's plot segmentation borders for the first z-layer:
+
+```{r, fig.height = 7}
+df1 <- subset(df, z == 1)
+ggplot(df1, aes(x = x, y = y)) + 
+    geom_polygon(aes(group = cell)) +
+    theme_void() 
+```
+
+Add holes:
+
+```{r}
+.f <- function(df) 
+{
+    df$x <- df$x + 0.5 * (mean(df$x) - df$x)
+    df$y <- df$y + 0.5 * (mean(df$y) - df$y)
+    return(df)
+}
+spl <- split(df1, df1$cell)
+dl <- lapply(spl, .f)
+holes <- do.call(rbind, dl)  
+df1$subid <- 1L
+holes$subid <- 2L
+df1 <- rbind(df1, holes)
+```
+
+Plot with holes:
+
+```{r, fig.height = 8}
+ggplot(df1, aes(x = x, y = y)) + 
+    geom_polygon(aes(group = cell, subgroup = subid), fill = "firebrick") +
+    theme_void() 
+```
+
+Plot over image:
+
+```{r, fig.height = 8}
+grb <- grid::rasterGrob(mem.img,
+    interpolate = FALSE,
+    width = unit(1, "npc"),
+    height = unit(1, "npc"))
+p <- ggplot() + 
+    annotation_custom(
+        grob = grb,
+        xmin = 0,
+        xmax = ncol(grb$raster),
+        ymin = 0,
+        ymax = nrow(grb$raster)) + 
+    coord_fixed(
+        xlim = c(0, ncol(grb$raster)),
+        ylim = c(0, nrow(grb$raster))) 
+p <- p + geom_polygon(
+            data = df1,
+            aes(x = x, y = y, group = cell, subgroup = subid), 
+            fill = "lightblue")
+p + theme_void()
+```
+
+# Interactive exploration with iSEE and Vitessce
+
+Create and process `SingleCellExperiment` for iSEE:
+
+```{r}
+sce <- SingleCellExperiment(assays = list(counts = counts.baysor), 
+                            colData = cdat.baysor)
+sce <- scater::logNormCounts(sce)
+sce <- scater::runPCA(sce)
+sce <- scater::runTSNE(sce, dimred = "PCA", perplexity = 30)
+sce <- scater::runUMAP(sce, dimred = "PCA")
+```
+
+Some cosmetics for visualization purposes:
+
+```{r}
+sce.sub <- subset(sce, , leiden_final != "Removed")
+lev <- levels(factor(sce.sub$leiden_final))
+levi <- setdiff(lev, lev[c(1,4,6)])
+sce.sub <- subset(sce, , leiden_final %in% levi)
+for(col in c("x", "y", "sizeFactor"))
+    sce.sub[[col]] <- round(sce.sub[[col]], digits = 3)
+sce.sub
 ```
